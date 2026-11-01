@@ -173,9 +173,8 @@ class BM25Index:
 
         self.chunk_id_to_idx = {c["chunk_id"]: i for i, c in enumerate(chunks)}
 
-        self.tokenized_docs = [self._tokenize(c["text"]) for c in chunks]
-
-        self.bm25 = BM25Okapi(self.tokenized_docs)
+        # Tokenized docs are not kept: BM25Okapi stores its own term counts, and a second copy costs ~240 MB
+        self.bm25 = BM25Okapi([self._tokenize(c["text"]) for c in chunks])
     
     def _tokenize(self, text: str) -> list[str]:
         """
