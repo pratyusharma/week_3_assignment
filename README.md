@@ -2,6 +2,63 @@
 
 A full-stack Retrieval-Augmented Generation (RAG) application for searching and querying SIGGRAPH 2025 research papers. This project combines a Next.js frontend with a FastAPI backend to provide an intelligent search interface powered by AI.
 
+## 🌐 Live Demo
+
+- **App (Vercel):** https://week-3-rag-assignment.vercel.app
+- **API (Render):** https://week-3-rag-assignment.onrender.com ([health check](https://week-3-rag-assignment.onrender.com/health))
+
+The backend runs on Render's free tier, which sleeps after 15 minutes of inactivity. The first search after that can take 30–60 seconds while it wakes up.
+
+## 📝 Implementation Notes
+
+### How a query flows
+
+```
+question ──► refine (gpt-4o-mini) ──► semantic search (Qdrant) ─┐
+                                  └─► BM25 keyword search ───────┴─► weighted merge ──► Cohere rerank ──► top 8 chunks
+                                                                                                          │
+answer with [Paper Title] citations ◄── gpt-4.1-mini ◄── formatted excerpts + original question ◄─────────┘
+```
+
+### Retrieval (`backend/retrieval_pipeline.py`)
+
+- **Embeddings:** 11,008 chunks were uploaded to Qdrant Cloud from the provided pre-computed `BAAI/bge-large-en-v1.5` embeddings (1024 dims, cosine) with `upload_from_npz.py`. Queries are embedded with the same model through OpenRouter.
+- **BGE query prefix:** queries are embedded as `"Represent this sentence for searching relevant passages: <query>"`. BGE was trained with this instruction on the query side only, so it places short questions closer to the passages that answer them. Passages are embedded without it.
+- **BM25:** built locally with `rank-bm25`. Text is lowercased and split on `\w+`; one-character tokens are dropped. BM25 always receives the user's text, never the BGE prefix.
+- **Hybrid merge:** each list's scores are normalized to 0–1 (divided by the list's max), then combined as `0.7 × semantic + 0.3 × BM25`. Chunks found by both searches can reach 1.0; a semantic-only hit tops out at 0.7 and a BM25-only hit at 0.3.
+- **Reranking:** the merged candidates are reranked with Cohere `rerank-english-v3.0`. If the Cohere key is missing, the call fails or `USE_RERANKER=false`, the pipeline falls back to the hybrid order instead of failing.
+
+### Generation (`backend/rag_generate.py`)
+
+- **Query refinement** (`openai/gpt-4o-mini`) rewrites conversational questions into search terms, e.g. "how do ppl make hair look realistic in games??" → "realistic hair rendering techniques in video games". The refined query is used only for retrieval; the answer model receives the user's original question. Any refinement failure falls back to the original query.
+- **Answering** uses `openai/gpt-4.1-mini` with the provided system prompt. Each excerpt is passed with its exact title so the model cites as `[Paper Title]`, which the frontend matches against the source list to build reference links.
+- **Model choice:** I compared several OpenRouter models on the same retrieved context. `gpt-4.1-mini` cited every claim with a title that matched a real source, at roughly 1/6 the cost of `gpt-4o`. Reasoning models (e.g. `deepseek-v4-flash`, `gpt-5-nano`) were avoided: they can spend the whole `max_tokens` budget on hidden reasoning and return an empty answer.
+
+### Configuration
+
+All settings are read from environment variables (`backend/.env` locally, the Render dashboard in production). See `backend/.env.example`.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OPENROUTER_API_KEY`, `QDRANT_URL`, `QDRANT_API_KEY` | required | Embeddings/LLM and vector database |
+| `COHERE_API_KEY`, `USE_RERANKER` | optional, `true` | Reranking |
+| `EMBEDDING_MODEL` | `baai/bge-large-en-v1.5` | Must match the vectors in Qdrant |
+| `LLM_MODEL` / `REFINEMENT_MODEL` | `openai/gpt-4.1-mini` / `openai/gpt-4o-mini` | Answer and refinement models |
+| `TEMPERATURE`, `MAX_TOKENS` | `0.1`, `2000` | Answer generation |
+| `REFINE_QUERY`, `RETRIEVAL_TOP_K` | `true`, `8` | Pipeline behaviour |
+
+### Changes to the starter code
+
+- **`api_server.py`:** besides switching the import from the mock to `rag_generate`, three changes were needed. The server built `GenerationConfig` with fields that only exist in the mock (`llm_provider`, `use_reranker`), so it now uses `GenerationConfig()`. It prefixed the model id with `openai/`, which broke full OpenRouter ids, so the id is now sent as-is. And it expected sources as a dict (the mock's format), so it now uses the list that `_build_sources_metadata()` returns.
+- **Refinement model:** the default `openai/gpt-3.5-turbo` is no longer available on OpenRouter, so refinement silently fell back on every query. It now uses `openai/gpt-4o-mini`.
+- **Memory:** the backend used ~615 MB, over Render's 512 MB free tier. `BM25Index` no longer keeps a second tokenized copy of every chunk (`BM25Okapi` stores its own term counts), which brings it to ~366 MB with identical results.
+
+### Known limitations
+
+- **Several chunks from one paper** can fill the top results, since neighbouring chunks overlap. A per-paper cap in `retrieve()` would give more varied sources.
+- **Long chunks:** about 15% of chunks (1,644) exceed the embedding model's 512-token limit, so their vectors only reflect the first ~512 tokens. This is also why `upload_to_qdrant.py` fails through OpenRouter, which rejects over-length inputs instead of truncating them.
+- **Dataset labels:** a few chunks carry another paper's title (e.g. chunk 6374 is titled "NAM: Neural Adjoint Maps" but contains MILo content), so a citation can occasionally point to the wrong paper.
+
 ## 🎯 Project Overview
 
 Build a production-ready RAG application that allows users to:
